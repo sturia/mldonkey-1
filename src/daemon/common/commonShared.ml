@@ -169,7 +169,7 @@ let new_shared dirname prio filename fullname =
   else begin
   CommonNetwork.networks_iter (fun n -> 
       CommonNetwork.network_share n fullname codedname size);
-  shared_calculate_total_bytes ();
+  (* the total is recomputed by the caller: once per scan round, not per file *)
   end
 
 let shared_num shared =
@@ -253,21 +253,27 @@ let can_share dirname =
   !!CommonOptions.temp_directory
   
 let waiting_directories = ref []
+
+(* one scan: directories visited, start time; reset when the queue is filled *)
+let dirs_scanned = ref 0
+let scan_start = ref 0.
   
 let shared_add_directory shared_dir local_dir =
   waiting_directories := (shared_dir, local_dir) :: !waiting_directories
-  
-let shared_scan_directory shared_dir local_dir =
+
+(* inodes of the directories never shared: incoming files, incoming
+   directories, temp; computed once per scan round *)
+type excluded_inodes = { ino_incoming_files : int; ino_incoming_dirs : int; ino_temp : int }
+
+let excluded_inodes () =
   let module U = Unix.LargeFile in
-  let incoming_files_inode = 
-    ((U.stat ((CommonComplexOptions.incoming_dir false ()).shdir_dirname)).U.st_ino)
-  in
-  let incoming_directories_inode = 
-    ((U.stat ((CommonComplexOptions.incoming_dir true ()).shdir_dirname)).U.st_ino)
-  in
-  let temp_directory_inode =
-    ((U.stat !!temp_directory).U.st_ino)
-  in
+  let ino d = (U.stat d).U.st_ino in
+  { ino_incoming_files = ino (CommonComplexOptions.incoming_dir false ()).shdir_dirname;
+    ino_incoming_dirs = ino (CommonComplexOptions.incoming_dir true ()).shdir_dirname;
+    ino_temp = ino !!temp_directory }
+  
+let shared_scan_directory excl shared_dir local_dir =
+  incr dirs_scanned;
   let dirname = shared_dir.shdir_dirname in
   let strategy = 
     CommonComplexOptions.sharing_strategy shared_dir.shdir_strategy in
@@ -291,13 +297,13 @@ let shared_scan_directory shared_dir local_dir =
                   if Autoconf.system <> "mingw" then
                   begin
                     let inode = ((Unix.stat full_name).Unix.st_ino) in
-                      if inode = incoming_files_inode then
+                      if inode = excl.ino_incoming_files then
             if !verbose_share then lprintf_nl "avoid sharing incoming_files %s" full_dir else ()
                       else
-                        if inode = incoming_directories_inode then
+                        if inode = excl.ino_incoming_dirs then
         if !verbose_share then lprintf_nl "avoid sharing incoming_directories %s" full_dir else ()
                         else
-                          if inode = temp_directory_inode then
+                          if inode = excl.ino_temp then
           if !verbose_share then lprintf_nl "avoid sharing temp %s" full_dir else ()
                           else
                             shared_add_directory shared_dir local_name
@@ -327,17 +333,37 @@ let shared_scan_directory shared_dir local_dir =
   else 
     lprintf_nl "Cannot share %s" full_dir
 
+(* the queue is drained on a time budget: at least one directory per
+   second, then more as long as the budget lasts, so that a tree of
+   hundreds of directories is scanned in seconds while the event loop is
+   never held for more than about scan_budget per second *)
+let scan_budget = 0.05
+
 let _ = 
   BasicSocket.add_infinite_timer 1. (fun _ ->
-      match !waiting_directories with
-        [] -> ()
-      | (shared_dir, local_dir) :: tail ->
-          waiting_directories := tail;
-          shared_scan_directory shared_dir local_dir;
-          (*
-          lprintf "Shared %d files %Ld bytes\n"
-            !files_scanned !files_scanned_size;
-           *)
+      if !waiting_directories <> [] then begin
+        match (try Some (excluded_inodes ()) with e ->
+            lprintf_nl "Shares: cannot stat incoming or temp directory (%s), scan postponed"
+              (Printexc2.to_string e); None) with
+        | None -> ()
+        | Some excl ->
+            let deadline = Unix.gettimeofday () +. scan_budget in
+            let rec loop () =
+              match !waiting_directories with
+                [] -> ()
+              | (shared_dir, local_dir) :: tail ->
+                  waiting_directories := tail;
+                  shared_scan_directory excl shared_dir local_dir;
+                  if Unix.gettimeofday () < deadline then loop ()
+            in
+            loop ();
+            shared_calculate_total_bytes ();
+            if !waiting_directories = [] then
+              lprintf_nl "Shared directories scanned: %d directories, %d files, %s in %.1f s"
+                !dirs_scanned !files_scanned
+                (Int64ops.int64_to_human_readable !files_scanned_size)
+                (Unix.gettimeofday () -. !scan_start)
+      end
   )
     
 let shared_add_directory shared_dir =
@@ -361,6 +387,8 @@ let shared_check_files () =
     List.iter shared_unshare !list;
     files_scanned_size := zero;
     files_scanned := 0;
+    dirs_scanned := 0;
+    scan_start := Unix.gettimeofday ();
     List.iter shared_add_directory !!CommonComplexOptions.shared_directories;
     shared_calculate_total_bytes ()
   end

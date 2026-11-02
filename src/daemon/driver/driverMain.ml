@@ -547,9 +547,7 @@ or getting a binary compiled with glibc %s.\n\n")
     add_infinite_timer 1. (fun timer ->
         MlUnix.set_console_title (DriverInteractive.console_topic ()));
 
-  List.iter
-    CommonShared.shared_add_directory
-  !!CommonComplexOptions.shared_directories;
+  (* shared_check_files above already queued every shared directory *)
 
   add_infinite_timer 1800. (fun timer ->
       DriverInteractive.browse_friends ());

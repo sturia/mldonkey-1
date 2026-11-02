@@ -265,6 +265,7 @@ let file_commit file =
                   ignore (CommonShared.new_shared
                       incoming.shdir_dirname incoming.shdir_priority
                       best_name new_name);
+                CommonShared.shared_calculate_total_bytes ()
               with e ->
                   lprintf_nl "Exception %s while trying to share committed file"
                     (Printexc2.to_string e);
