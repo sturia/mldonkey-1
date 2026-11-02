@@ -224,7 +224,10 @@ let rec check_shared_files () =
   if not !computing then
     match !shared_files with
       [] -> ()
-    | sh :: files ->
+    | sh :: _ ->
+        (* files are prepended to shared_files while sh is being hashed:
+           drop sh alone, never the list captured when the job started *)
+        let drop () = shared_files := List.filter (fun x -> x != sh) !shared_files in
         let rec job_creater _ =
           try
             if not (Sys.file_exists sh.shared_name) then
@@ -265,7 +268,7 @@ let rec check_shared_files () =
                     Hashtbl.add shared_files_info
                       (s.sh_name, s.sh_size, s.sh_mtime) s;
                     known_shared_files =:= s :: !!known_shared_files;
-                    shared_files := files;
+                    drop ();
                     new_file_to_share s sh.shared_shared.impl_shared_codedname (Some sh.shared_shared);
                   end
                 else
@@ -276,11 +279,11 @@ let rec check_shared_files () =
             )
           with
             Wrong_file_size (real,computed) -> 
-            shared_files := files;
+            drop ();
             lprintf_nl "Computed filesize %Ld does not match physical filesize %Ld, %s not shared"
               computed real sh.shared_name
           | e ->
-            shared_files := files;
+            drop ();
             lprintf_nl "Exception %s prevents sharing of %s"
               (Printexc2.to_string e) sh.shared_name
         in
